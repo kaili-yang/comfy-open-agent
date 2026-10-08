@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+recursive-include src *.py
+recursive-include web dist
+recursive-include skills *.md
+global-exclude __pycache__
+global-exclude *.pyc

@@ -1,0 +1,11 @@
+{
+  "agent": {
+    "title": "Open Agent",
+    "welcome": "Hello! I'm your open-source ComfyUI agent. Tell me what you'd like to create, and I'll help you build workflows.",
+    "thinking": "Thinking...",
+    "done": "Done!",
+    "error": "Sorry, something went wrong. Please try again.",
+    "placeholder": "Describe what you want to create... (Ctrl+Enter to send)",
+    "send": "Send"
+  }
+}
