@@ -1,308 +1,117 @@
-"""MCP server implementation for Comfy Open Agent."""
+"""MCP (Model Context Protocol) server over Streamable HTTP, JSON responses only."""
 
-import json
-import asyncio
-from typing import Dict, Any, List, Optional
-from aiohttp import web, WSMsgType
+import uuid
+from typing import Any, Dict, List, Optional
+
+from ..skills.manager import get_skills_manager
+from ..tools import ToolContext, ToolOutput, ToolRegistry, get_registry
+
+SERVER_INFO = {"name": "comfy-open-agent", "version": "0.2.0"}
+SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+SKILL_URI_PREFIX = "skill://"
+
+INSTRUCTIONS = (
+    "Tools to inspect and edit the workflow open in a ComfyUI browser tab, queue it, and read results. "
+    "Canvas tools (get_canvas, load_workflow, add_node, connect, set_widgets, queue_workflow, ...) need the "
+    "ComfyUI web UI to be open. Use search_nodes / get_node_info / list_models instead of guessing names. "
+    "Skills with task-specific instructions are available as resources and through read_skill."
+)
+
+
+class JsonRpcError(Exception):
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def tool_output_to_mcp(output: ToolOutput) -> Dict[str, Any]:
+    content: List[Dict[str, Any]] = [{"type": "text", "text": output.text}]
+    for img in output.images:
+        content.append({"type": "image", "data": img.data, "mimeType": img.media_type})
+    return {"content": content, "isError": output.is_error}
 
 
 class MCPServer:
-    """MCP server for external agent integration."""
-
-    def __init__(self, comfy_app):
-        """
-        Initialize MCP server.
-
-        Args:
-            comfy_app: ComfyUI application instance
-        """
-        self.app = comfy_app
+    def __init__(self, registry: Optional[ToolRegistry] = None):
+        self._registry = registry
         self.sessions: Dict[str, Dict[str, Any]] = {}
-        self.routes = web.RouteTableDef()
 
-        self._setup_routes()
+    @property
+    def registry(self) -> ToolRegistry:
+        return self._registry or get_registry()
 
-    def _setup_routes(self):
-        """Setup MCP HTTP routes."""
-        self.routes.post('/mcp')(self.handle_mcp_request)
+    async def handle(self, message: Dict[str, Any], session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Handle one JSON-RPC message. Returns None for notifications."""
+        msg_id = message.get("id")
+        method = message.get("method")
+        is_notification = "id" not in message
 
-    async def handle_mcp_request(self, request: web.Request) -> web.Response:
-        """
-        Handle MCP HTTP request.
-
-        Args:
-            request: aiohttp request
-
-        Returns:
-            web.Response with MCP response
-        """
-        try:
-            data = await request.json()
-
-            # Check for session ID
-            session_id = request.headers.get('Mcp-Session-Id')
-            if session_id:
-                data['session_id'] = session_id
-
-            # Process the request
-            response = await self._process_request(data)
-
-            return web.json_response(response)
-        except Exception as e:
-            print(f"[MCP] Error handling request: {e}")
-            return web.json_response(
-                {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32603, "message": str(e)},
-                },
-                status=500
-            )
-
-    async def _process_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process an MCP request.
-
-        Args:
-            request_data: Request data
-
-        Returns:
-            Response data
-        """
-        method = request_data.get('method', '')
-        params = request_data.get('params', {})
-        request_id = request_data.get('id')
-
-        # Handle session initialization
-        if method == 'initialize':
-            return self._handle_initialize(params, request_id)
-
-        # Method handlers
-        handlers = {
-            'tools/list': self._handle_tools_list,
-            'tools/call': self._handle_tools_call,
-            'resources/list': self._handle_resources_list,
-            'resources/read': self._handle_resources_read,
-            'prompts/list': self._handle_prompts_list,
-            'prompts/get': self._handle_prompts_get,
-        }
-
-        handler = handlers.get(method)
-        if handler:
-            return await handler(params, request_id)
-
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": "Method not found"},
-        }
-
-    def _handle_initialize(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle initialize request."""
-        session_id = params.get('session_id', 'default')
-
-        self.sessions[session_id] = {
-            'initialized': True,
-            'capabilities': params.get('capabilities', {}),
-        }
-
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                    "resources": {},
-                    "prompts": {},
-                },
-                "serverInfo": {
-                    "name": "comfy-open-agent",
-                    "version": "0.1.0",
-                },
-            },
-        }
-
-    async def _handle_tools_list(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle tools/list request."""
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "tools": self._get_available_tools()
-            },
-        }
-
-    async def _handle_tools_call(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle tools/call request."""
-        tool_name = params.get('name', '')
-        arguments = params.get('arguments', {})
+        if message.get("jsonrpc") != "2.0" or not isinstance(method, str):
+            if is_notification:
+                return None
+            return _error(msg_id, -32600, "Invalid Request")
 
         try:
-            result = await self._execute_tool(tool_name, arguments)
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(result, indent=2)
-                        }
-                    ]
-                },
-            }
+            result = await self._dispatch(method, message.get("params") or {}, session_id)
+        except JsonRpcError as e:
+            return None if is_notification else _error(msg_id, e.code, e.message)
         except Exception as e:
+            return None if is_notification else _error(msg_id, -32603, f"{type(e).__name__}: {e}")
+        return None if is_notification else {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+    def new_session(self, params: Dict[str, Any]) -> str:
+        session_id = uuid.uuid4().hex
+        self.sessions[session_id] = {"client": params.get("clientInfo", {})}
+        return session_id
+
+    async def _dispatch(self, method: str, params: Dict[str, Any], session_id: Optional[str]) -> Any:
+        if method == "initialize":
+            requested = params.get("protocolVersion")
+            version = requested if requested in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0]
             return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32603, "message": str(e)},
+                "protocolVersion": version,
+                "capabilities": {"tools": {"listChanged": False}, "resources": {"listChanged": False}},
+                "serverInfo": SERVER_INFO,
+                "instructions": INSTRUCTIONS,
             }
-
-    async def _handle_resources_list(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle resources/list request."""
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {"resources": []},
-        }
-
-    async def _handle_resources_read(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle resources/read request."""
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": "Not implemented"},
-        }
-
-    async def _handle_prompts_list(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle prompts/list request."""
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {"prompts": []},
-        }
-
-    async def _handle_prompts_get(self, params: Dict[str, Any], request_id: Any) -> Dict[str, Any]:
-        """Handle prompts/get request."""
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": "Not implemented"},
-        }
-
-    def _get_available_tools(self) -> List[Dict[str, Any]]:
-        """Get list of available MCP tools."""
-        return [
-            {
-                "name": "get_canvas",
-                "description": "Get the current canvas state with all nodes and connections",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                },
-            },
-            {
-                "name": "edit_graph",
-                "description": "Edit the node graph (add, remove, modify nodes)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["add_node", "remove_node", "connect_nodes", "disconnect_nodes", "set_widget_value"],
-                        },
-                        "data": {"type": "object"},
-                    },
-                    "required": ["operation", "data"],
-                },
-            },
-            {
-                "name": "run_workflow",
-                "description": "Run the current workflow",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "node_id": {"type": "string", "description": "Optional node ID to start from"},
-                    },
-                },
-            },
-            {
-                "name": "get_workflow",
-                "description": "Get the current workflow as JSON",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                },
-            },
-            {
-                "name": "inspect_image",
-                "description": "Inspect an image output",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "node_id": {"type": "string"},
-                        "output_index": {"type": "number"},
-                    },
-                    "required": ["node_id"],
-                },
-            },
-            {
-                "name": "list_models",
-                "description": "List available models",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "model_type": {"type": "string"},
-                    },
-                },
-            },
-        ]
-
-    async def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute an MCP tool.
-
-        Args:
-            tool_name: Name of the tool to execute
-            arguments: Tool arguments
-
-        Returns:
-            Tool execution result
-        """
-        # Import graph operations here to avoid circular imports
-        from ..graph.operations import GraphOperations
-
-        graph_ops = GraphOperations(self.app)
-
-        tool_handlers = {
-            'get_canvas': graph_ops.get_canvas,
-            'edit_graph': graph_ops.edit_graph,
-            'run_workflow': graph_ops.run_workflow,
-            'get_workflow': graph_ops.get_workflow,
-            'inspect_image': graph_ops.inspect_image,
-            'list_models': graph_ops.list_models,
-        }
-
-        handler = tool_handlers.get(tool_name)
-        if handler:
-            if asyncio.iscoroutinefunction(handler):
-                return await handler(arguments)
-            return handler(arguments)
-
-        return {
-            "status": "error",
-            "message": f"Unknown tool: {tool_name}",
-        }
+        if method == "ping" or method.startswith("notifications/"):
+            return {}
+        if method == "tools/list":
+            return {"tools": [
+                {"name": t.name, "description": t.description, "inputSchema": t.input_schema}
+                for t in self.registry.all()
+            ]}
+        if method == "tools/call":
+            name = params.get("name")
+            if not isinstance(name, str) or self.registry.get(name) is None:
+                raise JsonRpcError(-32602, f"Unknown tool: {name}")
+            arguments = params.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                raise JsonRpcError(-32602, "arguments must be an object")
+            output = await self.registry.call(name, arguments, ToolContext())
+            return tool_output_to_mcp(output)
+        if method == "resources/list":
+            return {"resources": [
+                {"uri": SKILL_URI_PREFIX + s["name"], "name": s["name"], "description": s["description"],
+                 "mimeType": "text/markdown"}
+                for s in get_skills_manager().list_skills()
+            ]}
+        if method == "resources/templates/list":
+            return {"resourceTemplates": []}
+        if method == "resources/read":
+            uri = str(params.get("uri", ""))
+            skill = get_skills_manager().get_skill(uri[len(SKILL_URI_PREFIX):]) if uri.startswith(SKILL_URI_PREFIX) else None
+            if skill is None:
+                raise JsonRpcError(-32002, f"Resource not found: {uri}")
+            return {"contents": [{"uri": uri, "mimeType": "text/markdown", "text": skill.content}]}
+        if method == "prompts/list":
+            return {"prompts": []}
+        raise JsonRpcError(-32601, f"Method not found: {method}")
 
 
-def setup_mcp_server(comfy_app) -> MCPServer:
-    """
-    Setup and return MCP server instance.
+def _error(msg_id: Any, code: int, message: str) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
-    Args:
-        comfy_app: ComfyUI application instance
 
-    Returns:
-        MCPServer instance
-    """
-    return MCPServer(comfy_app)
+mcp_server = MCPServer()

@@ -1,217 +1,115 @@
-"""Agent skills manager for Comfy Open Agent."""
+"""Agent skills: SKILL.md instruction packs with optional reference files."""
 
 import os
-import json
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+BUILTIN_SKILLS_DIR = PACKAGE_ROOT / "skills"
+EXTRA_SKILLS_ENV = "COMFY_OPEN_AGENT_SKILLS_DIR"
+MAX_REFERENCE_BYTES = 200_000
+
+_FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_DESCRIPTION_LINE = re.compile(r"^\s*(?:\*\*)?description(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.+)$", re.IGNORECASE)
 
 
+@dataclass
 class Skill:
-    """Represents an agent skill."""
+    name: str
+    description: str
+    content: str
+    directory: Path
+    references: List[str] = field(default_factory=list)
 
-    def __init__(self, name: str, description: str, content: str, references: Optional[List[str]] = None):
-        """
-        Initialize a skill.
+    def to_summary(self) -> Dict[str, str]:
+        return {"name": self.name, "description": self.description}
 
-        Args:
-            name: Skill name
-            description: Skill description
-            content: Skill content (SKILL.md content)
-            references: List of reference file paths
-        """
-        self.name = name
-        self.description = description
-        self.content = content
-        self.references = references or []
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert skill to dictionary."""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "content": self.content,
-            "references": self.references,
-        }
+def parse_skill(text: str, default_name: str) -> Dict[str, str]:
+    """Extract name/description from YAML-ish frontmatter or a 'Description:' line."""
+    meta: Dict[str, str] = {}
+    body = text
+    match = _FRONTMATTER.match(text)
+    if match:
+        body = text[match.end():]
+        for line in match.group(1).splitlines():
+            if ":" in line and not line.startswith((" ", "\t")):
+                key, value = line.split(":", 1)
+                meta[key.strip().lower()] = value.strip().strip("'\"")
+
+    description = meta.get("description", "")
+    if not description:
+        for line in body.splitlines():
+            m = _DESCRIPTION_LINE.match(line)
+            if m:
+                description = m.group(1).strip()
+                break
+    if not description:
+        description = next((l.strip("# ").strip() for l in body.splitlines() if l.strip()), "")
+
+    return {"name": meta.get("name") or default_name, "description": description[:300], "body": body}
 
 
 class SkillsManager:
-    """Manager for agent skills."""
+    def __init__(self, skill_dirs: Optional[List[Path]] = None):
+        if skill_dirs is None:
+            skill_dirs = [BUILTIN_SKILLS_DIR]
+            extra = os.environ.get(EXTRA_SKILLS_ENV)
+            if extra:
+                skill_dirs += [Path(p) for p in extra.split(os.pathsep) if p]
+        self.skill_dirs = skill_dirs
 
-    def __init__(self, skills_dir: Optional[str] = None):
-        """
-        Initialize skills manager.
+    def load(self) -> Dict[str, Skill]:
+        """Scan skill directories. Later directories override earlier ones by name."""
+        skills: Dict[str, Skill] = {}
+        for root in self.skill_dirs:
+            if not root.is_dir():
+                continue
+            for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+                skill_file = skill_dir / "SKILL.md"
+                if not skill_file.is_file():
+                    continue
+                try:
+                    text = skill_file.read_text(encoding="utf-8")
+                except OSError as e:
+                    print(f"[comfy-open-agent] Could not read {skill_file}: {e}")
+                    continue
+                parsed = parse_skill(text, skill_dir.name)
+                references = sorted(
+                    str(p.relative_to(skill_dir)).replace(os.sep, "/")
+                    for p in skill_dir.rglob("*")
+                    if p.is_file() and p.name != "SKILL.md" and not p.name.startswith(".")
+                )
+                skills[parsed["name"]] = Skill(
+                    parsed["name"], parsed["description"], parsed["body"], skill_dir, references
+                )
+        return skills
 
-        Args:
-            skills_dir: Directory containing skills
-        """
-        if skills_dir is None:
-            # Default to skills directory in the package
-            self.skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
-        else:
-            self.skills_dir = Path(skills_dir)
-
-        self.skills: Dict[str, Skill] = {}
-        self._load_skills()
-
-    def _load_skills(self):
-        """Load all skills from the skills directory."""
-        if not self.skills_dir.exists():
-            print(f"[SkillsManager] Skills directory not found: {self.skills_dir}")
-            return
-
-        for skill_path in self.skills_dir.iterdir():
-            if skill_path.is_dir():
-                skill_file = skill_path / "SKILL.md"
-                if skill_file.exists():
-                    skill = self._load_skill(skill_path, skill_file)
-                    if skill:
-                        self.skills[skill.name] = skill
-                        print(f"[SkillsManager] Loaded skill: {skill.name}")
-
-    def _load_skill(self, skill_dir: Path, skill_file: Path) -> Optional[Skill]:
-        """
-        Load a single skill.
-
-        Args:
-            skill_dir: Skill directory
-            skill_file: SKILL.md file path
-
-        Returns:
-            Skill instance or None
-        """
-        try:
-            with open(skill_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            # Extract name and description from content
-            name = skill_dir.name
-            description = self._extract_description(content)
-
-            # Load references if they exist
-            references_dir = skill_dir / "references"
-            references = []
-            if references_dir.exists():
-                for ref_file in references_dir.iterdir():
-                    if ref_file.is_file():
-                        references.append(str(ref_file))
-
-            return Skill(name, description, content, references)
-
-        except Exception as e:
-            print(f"[SkillsManager] Error loading skill from {skill_dir}: {e}")
-            return None
-
-    def _extract_description(self, content: str) -> str:
-        """
-        Extract description from skill content.
-
-        Args:
-            content: Skill content
-
-        Returns:
-            Description string
-        """
-        # Look for a description line or use the first paragraph
-        lines = content.split('\n')
-        for line in lines:
-            if line.lower().startswith('description:'):
-                return line.split(':', 1)[1].strip()
-
-        # If no description line, use first non-empty line
-        for line in lines:
-            if line.strip():
-                return line.strip()[:200]  # First 200 chars
-
-        return "No description available"
+    def list_skills(self) -> List[Dict[str, str]]:
+        return [s.to_summary() for s in self.load().values()]
 
     def get_skill(self, name: str) -> Optional[Skill]:
-        """
-        Get a skill by name.
+        return self.load().get(name)
 
-        Args:
-            name: Skill name
-
-        Returns:
-            Skill instance or None
-        """
-        return self.skills.get(name)
-
-    def list_skills(self) -> List[Dict[str, Any]]:
-        """
-        List all available skills.
-
-        Returns:
-            List of skill dictionaries
-        """
-        return [skill.to_dict() for skill in self.skills.values()]
-
-    def search_skills(self, query: str) -> List[Skill]:
-        """
-        Search for skills by name or description.
-
-        Args:
-            query: Search query
-
-        Returns:
-            List of matching skills
-        """
-        query_lower = query.lower()
-        results = []
-
-        for skill in self.skills.values():
-            if (query_lower in skill.name.lower() or
-                query_lower in skill.description.lower() or
-                query_lower in skill.content.lower()):
-                results.append(skill)
-
-        return results
-
-    def get_skill_content(self, name: str) -> Optional[str]:
-        """
-        Get the full content of a skill.
-
-        Args:
-            name: Skill name
-
-        Returns:
-            Skill content or None
-        """
+    def read_reference(self, name: str, relative_path: str) -> str:
         skill = self.get_skill(name)
-        if skill:
-            return skill.content
-        return None
-
-    def get_skill_references(self, name: str) -> List[str]:
-        """
-        Get reference file paths for a skill.
-
-        Args:
-            name: Skill name
-
-        Returns:
-            List of reference file paths
-        """
-        skill = self.get_skill(name)
-        if skill:
-            return skill.references
-        return []
+        if skill is None:
+            raise KeyError(f"Unknown skill '{name}'")
+        root = skill.directory.resolve()
+        path = (root / relative_path).resolve()
+        if root not in path.parents or not path.is_file():
+            raise KeyError(f"Skill '{name}' has no file '{relative_path}'")
+        data = path.read_bytes()[:MAX_REFERENCE_BYTES]
+        return data.decode("utf-8", errors="replace")
 
 
-# Global skills manager instance
 _skills_manager: Optional[SkillsManager] = None
 
 
-def get_skills_manager(skills_dir: Optional[str] = None) -> SkillsManager:
-    """
-    Get the global skills manager instance.
-
-    Args:
-        skills_dir: Optional skills directory
-
-    Returns:
-        SkillsManager instance
-    """
+def get_skills_manager() -> SkillsManager:
     global _skills_manager
     if _skills_manager is None:
-        _skills_manager = SkillsManager(skills_dir)
+        _skills_manager = SkillsManager()
     return _skills_manager

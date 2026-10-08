@@ -1,245 +1,183 @@
 # Comfy Open Agent
 
-An open-source ComfyUI agent that provides AI-powered workflow building and editing capabilities. This is a free alternative to Comfy Agent/ComfyTV Bot.
+An open-source agent for ComfyUI: chat with an LLM in a sidebar panel and it
+builds, edits, runs and debugs the workflow on your canvas. The same tools are
+exposed over MCP, so Claude Code, Codex and other MCP clients can drive
+ComfyUI too.
 
 ## Features
 
-- **Full-stack implementation**: Python backend + Vue frontend
-- **Multi-provider LLM support**: Local LLM (Ollama/LM Studio), OpenAI, Anthropic
-- **MCP (Model Context Protocol) compliant**: Compatible with Claude Code, Codex, and other MCP clients
-- **Chat interface**: Natural language conversation to build and edit workflows
-- **Graph editing**: Add, connect, configure, and remove nodes programmatically
-- **Agent skills system**: Support for SKILL.md format for reusable instruction packs
-- **Workflow validation**: Check workflows before execution
-- **Image inspection**: View and analyze generated outputs
+- **Sidebar chat panel** that edits the live canvas (add/remove/connect nodes,
+  set widget values, load whole workflows), queues runs, waits for results and
+  looks at the output images.
+- **Any LLM with tool calling**: local OpenAI-compatible servers (Ollama,
+  LM Studio, vLLM, ...), the OpenAI API, or the Anthropic API.
+- **MCP server** at `/comfy-open-agent/mcp` (Streamable HTTP) with the same
+  tool set.
+- **Grounded in your install**: the agent looks up real node types, input
+  names, combo options and model files instead of guessing.
+- **Skills**: `SKILL.md` instruction packs with reference files, loaded on
+  demand.
 
-## Architecture
+## How it works
 
-- **Backend**: Python custom nodes with MCP server
-- **Frontend**: Vue 3 chat panel integrated with ComfyUI_frontend
-- **Protocol**: Model Context Protocol (MCP) for agent communication
+```
+ Sidebar panel ──POST /comfy-open-agent/chat──▶ Agent loop (Python) ──▶ LLM
+                                                    │
+                       ┌────────────────────────────┴───────────────┐
+             server tools (node catalog,          canvas tools (get_canvas,
+             models, run status, images,          add_node, connect, ...)
+             skills) run in Python                      │ websocket
+                                                        ▼
+ MCP client ──POST /comfy-open-agent/mcp──▶ same tools   browser tab runs the
+                                                        operation on the graph
+```
+
+The LiteGraph canvas only exists in the browser, so canvas tools are sent to
+the open ComfyUI tab over ComfyUI's websocket. The tab applies them and posts
+the result back. Canvas tools therefore need a ComfyUI tab to be open; the
+most recently focused tab receives them.
 
 ## Installation
 
-### Backend (Python)
-
-1. Clone this repository into your ComfyUI `custom_nodes` directory:
 ```bash
 cd ComfyUI/custom_nodes
 git clone <repo-url> comfy-open-agent
+pip install -r comfy-open-agent/requirements.txt   # in ComfyUI's Python environment
 ```
 
-2. Install Python dependencies:
-```bash
-cd comfy-open-agent
-pip install -r requirements.txt
-```
-
-3. Restart ComfyUI
-
-### Frontend (Vue)
-
-1. Navigate to the web directory:
-```bash
-cd comfy-open-agent/web
-npm install
-npm run build
-```
-
-2. Refresh ComfyUI
+Restart ComfyUI and open the **Open Agent** tab in the left sidebar. The built
+frontend (`web/dist`) is committed, so Node.js is only needed for development.
 
 ## Configuration
 
-Configure LLM providers in ComfyUI settings:
+Settings → **Open Agent**:
 
-### Local LLM (Ollama)
-- Set Ollama base URL (default: `http://localhost:11434`)
-- Select model name (e.g., `llama3.2`, `mistral`)
+| Setting | Notes |
+| --- | --- |
+| LLM provider | `local` (any OpenAI-compatible server), `openai`, `anthropic` |
+| Model name | Empty = provider default: `qwen3` / `gpt-5` / `claude-opus-5-5` |
+| API base URL | Empty = `http://localhost:11434/v1` / `https://api.openai.com/v1` / `https://api.anthropic.com` |
+| API key | Not needed for local servers. If empty, the server uses `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` |
+| Max steps | Tool calls per message before the agent pauses (default 30) |
 
-### OpenAI API
-- Set API endpoint (default: `https://api.openai.com/v1`)
-- Provide API key
-- Select model (e.g., `gpt-4`, `gpt-3.5-turbo`)
+Local models must support tool calling (for example `qwen2.5`, `qwen3`,
+`llama3.1` in Ollama). Bigger models follow multi-step instructions much more
+reliably.
 
-### Anthropic API
-- Set API endpoint (default: `https://api.anthropic.com`)
-- Provide API key
-- Select model (e.g., `claude-3-opus`, `claude-3-sonnet`)
+With the Anthropic provider on the official endpoint, Claude Opus 5.5 / Sonnet
+5.5 / Opus 5 / Fable 5.1 requests opt into server-side refusal fallbacks
+(`fallbacks: "default"`), so a declined request is retried on Anthropic's
+recommended fallback model instead of failing.
 
-## Usage
+## Using it over MCP
 
-### Using the Chat Interface
+Add the endpoint to your MCP client, e.g. Claude Code:
 
-1. Add the "Open Agent" node to your workflow
-2. The chat panel will appear in the node
-3. Describe what you want to create (e.g., "Create a text-to-image workflow with SDXL")
-4. The agent will:
-   - Understand your request
-   - Build the appropriate nodes
-   - Connect them correctly
-   - Set default values
-   - Execute the workflow
-
-### Using MCP Server
-
-The MCP server is available at `POST /comfy-open-agent/mcp` on your ComfyUI server.
-
-Tools available:
-- `get_canvas`: Read live canvas snapshot
-- `edit_graph`: Add/remove/modify nodes
-- `run_workflow`: Execute workflows
-- `inspect_image`: View generated outputs
-- `list_models`: Browse available models
-- `get_workflow`: Get current workflow as JSON
-
-### Example MCP Client (Python)
-
-```python
-import httpx
-
-async def call_mcp_tool(tool_name: str, arguments: dict):
-    response = await httpx.post(
-        "http://localhost:8188/comfy-open-agent/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments
-            },
-            "id": 1
-        }
-    )
-    return response.json()
+```bash
+claude mcp add --transport http comfyui http://127.0.0.1:8188/comfy-open-agent/mcp
 ```
 
-## Agent Skills
+Keep a ComfyUI tab open for the canvas tools. Skills are also exposed as MCP
+resources (`skill://<name>`).
 
-The agent skills system allows you to create reusable instruction packs for specific tasks.
+### Tools
 
-### Built-in Skills
+| Tool | Runs in | Purpose |
+| --- | --- | --- |
+| `get_canvas` | browser | Nodes, widget values and links on the canvas |
+| `load_workflow` | browser | Replace the canvas with an API-format workflow |
+| `add_node`, `remove_node` | browser | Add / remove a node |
+| `connect`, `disconnect` | browser | Link slots by name or index |
+| `set_widgets` | browser | Set widget values (combo values are validated) |
+| `queue_workflow` | browser | Queue the canvas; returns `prompt_id` or validation errors |
+| `search_nodes`, `get_node_info` | server | Find node types and their inputs/outputs |
+| `list_models` | server | Model folders and files |
+| `get_run_status` | server | Wait for a run; outputs and execution errors |
+| `view_image` | server | Return an output/input/temp image to the model |
+| `read_skill` | server | Load a skill or one of its reference files |
 
-- **basic-workflow-builder**: Build basic text-to-image workflows
+## Skills
 
-### Creating Custom Skills
-
-Create a new skill by adding a directory to `skills/`:
+A skill is a directory with a `SKILL.md` and optional reference files:
 
 ```
 skills/
   my-skill/
     SKILL.md
     references/
-      example-workflow.json
-      prompt-template.txt
+      workflow.json
 ```
-
-The `SKILL.md` file should contain:
-- A description (first line or explicit `Description:` field)
-- When to use this skill
-- Step-by-step instructions
-- Example workflows
-- Tips and best practices
-
-### Example Skill Format
 
 ```markdown
+---
+name: my-skill
+description: One line saying when the agent should use this skill.
+---
+
 # My Skill
 
-**Description**: Brief description of what this skill does.
-
-## When to use this skill
-
-Use this skill when...
-
-## Instructions
-
-Step-by-step instructions...
-
-## Example workflows
-
-Code examples...
-
-## Tips
-
-Additional tips...
+Step-by-step instructions for the agent...
 ```
+
+The agent sees every skill's name and description and loads the full text with
+`read_skill` when one matches. Built-in skills live in `skills/`; add your own
+directories with the `COMFY_OPEN_AGENT_SKILLS_DIR` environment variable
+(`os.pathsep`-separated). A skill there with the same name overrides the
+built-in one.
+
+## HTTP API
+
+All routes are also available under `/api/...`.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /comfy-open-agent/chat` | Run one user message; streams NDJSON events |
+| `POST /comfy-open-agent/chat/stop` | Stop a running turn |
+| `POST /comfy-open-agent/chat/reset` | Forget a conversation |
+| `GET /comfy-open-agent/info` | Provider defaults, skills, whether a tab is connected |
+| `POST/GET/DELETE /comfy-open-agent/mcp` | MCP endpoint |
+
+Conversations are kept in server memory and are lost when ComfyUI restarts.
+Changing the provider, model or base URL starts a new conversation.
 
 ## Development
 
-### Backend Development
-
 ```bash
-cd comfy-open-agent
-python -m pytest tests/
+# Backend tests (no ComfyUI needed)
+pip install pytest anthropic openai
+python -m pytest
+
+# Frontend
+cd web
+npm install
+npm test           # unit tests
+npm run build      # typecheck + build to web/dist
+npm run dev        # rebuild on change
 ```
 
-### Frontend Development
-
-```bash
-cd comfy-open-agent/web
-npm run dev  # Watch mode for development
-npm run build  # Production build
-npm run typecheck  # Type checking
-```
-
-## Project Structure
+### Project structure
 
 ```
 comfy-open-agent/
-├── src/
-│   └── comfy_open_agent/
-│       ├── nodes.py           # Main node definitions
-│       ├── mcp/
-│       │   └── server.py      # MCP server implementation
-│       ├── llm/
-│       │   └── providers.py   # LLM provider implementations
-│       ├── graph/
-│       │   └── operations.py  # Graph editing operations
-│       └── skills/
-│           └── manager.py     # Skills system manager
-├── web/
-│   ├── src/
-│   │   ├── components/
-│   │   │   └── AgentChatPanel.vue
-│   │   ├── locales/
-│   │   └── main.ts
-│   └── package.json
-├── skills/                    # Agent skills directory
-│   └── basic-workflow-builder/
-│       └── SKILL.md
-├── requirements.txt
-├── pyproject.toml
-└── README.md
+├── __init__.py                 # ComfyUI entry: registers routes, serves web/dist
+├── src/comfy_open_agent/
+│   ├── routes.py               # HTTP routes
+│   ├── bridge.py               # Forwards canvas tools to the browser tab
+│   ├── agent/loop.py           # Agent loop, conversations, system prompt
+│   ├── llm/providers.py        # OpenAI-compatible and Anthropic providers
+│   ├── tools/                  # Tool registry, canvas/server/skill tools
+│   ├── mcp/server.py           # MCP JSON-RPC handling
+│   └── skills/manager.py       # Skill discovery
+├── skills/                     # Built-in skills
+├── tests/                      # Backend tests
+└── web/
+    ├── src/main.ts             # Registers settings, sidebar tab, bridge
+    ├── src/lib/canvasOps.ts    # Canvas operations run in the browser
+    ├── src/components/         # Chat panel
+    └── dist/                   # Built bundle loaded by ComfyUI
 ```
 
 ## License
 
-MIT License - Free and open source
-
-## Contributing
-
-Contributions welcome! Please read the guidelines below:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## Roadmap
-
-- [ ] Add more built-in skills (video generation, image editing, etc.)
-- [ ] Implement workflow validation and error checking
-- [ ] Add support for custom node discovery
-- [ ] Improve LLM prompt engineering for better graph generation
-- [ ] Add workflow templates library
-- [ ] Implement memory/context for multi-turn conversations
-- [ ] Add support for batch operations
-- [ ] Create comprehensive documentation
-
-## Acknowledgments
-
-- Inspired by Comfy Agent and ComfyTV Bot
-- Built with Vue 3, PrimeVue, and the ComfyUI frontend API
-- Uses the Model Context Protocol (MCP) for agent integration
+MIT

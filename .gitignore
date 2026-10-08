@@ -4,14 +4,16 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
+/build/
 develop-eggs/
 dist/
+# The built frontend ships with the repo so git installs work without Node
+!web/dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -44,7 +46,7 @@ yarn-error.log*
 Thumbs.db
 
 # ComfyUI specific
-models/
-output/
-input/
-temp/
+/models/
+/output/
+/input/
+/temp/

@@ -1,50 +1,38 @@
+---
+name: basic-workflow-builder
+description: Build a standard text-to-image workflow (checkpoint -> prompts -> KSampler -> VAE decode -> save) for SD1.5/SDXL-style checkpoints.
+---
+
 # Basic Workflow Builder
 
-**Description**: Build basic ComfyUI text-to-image workflows from natural language descriptions.
+## When to use
 
-## When to use this skill
+The user wants a plain text-to-image workflow, or wants to start from one
+before adding LoRAs, upscaling, or other steps.
 
-Use this skill when the user wants to:
-- Create a simple text-to-image workflow
-- Generate images from text prompts
-- Build a basic SDXL or Stable Diffusion workflow
-- Set up a workflow with KSampler, VAE decode, and save nodes
+## Steps
 
-## Instructions
+1. Pick the model: call `list_models` with `folder="checkpoints"` and use an
+   exact file name from the result. If several fit and the user did not say
+   which, ask.
+2. Read `references/text2img-api.json` with `read_skill` (file argument). It
+   is a complete API-format workflow.
+3. Fill in:
+   - node 1 `ckpt_name`: the chosen checkpoint
+   - node 2 `text`: the positive prompt (ask if the user gave none)
+   - node 3 `text`: the negative prompt (default `blurry, low quality, distorted`)
+   - node 4 `width`/`height`: 512x512 for SD1.5, 1024x1024 for SDXL, unless asked otherwise
+   - node 5 `seed`: a random integer; `steps` 20–30; `cfg` 7
+4. Call `load_workflow` with the filled workflow. If the canvas already has
+   work on it, ask before replacing it.
+5. Only call `queue_workflow` if the user asked for an image. Then wait with
+   `get_run_status` and check the result with `view_image`.
 
-When the user describes what they want to create:
+## Variations
 
-1. **Understand the request**: Identify the core image generation task
-2. **Select appropriate model**: Ask which model to use if not specified (SDXL, SD1.5, etc.)
-3. **Build the workflow**:
-   - Add a `CheckpointLoaderSimple` node for the model
-   - Add a `CLIPTextEncode` node for the positive prompt
-   - Add a `CLIPTextEncode` node for the negative prompt
-   - Add a `KSampler` node for sampling
-   - Add a `VAEDecode` node to decode latents
-   - Add a `SaveImage` node to save the output
-4. **Connect the nodes**: Connect the outputs/inputs in the correct order
-5. **Set default values**:
-   - KSampler steps: 20-30
-   - KSampler cfg: 7.0-8.0
-   - KSampler seed: random
-   - Negative prompt: "blurry, low quality, distorted"
-
-## Example workflows
-
-### Simple text-to-image
-```
-CheckpointLoaderSimple -> CLIP (clip) -> CLIPTextEncode (positive)
-CheckpointLoaderSimple -> VAE (vae) -> VAEDecode -> SaveImage
-CheckpointLoaderSimple -> MODEL (model) -> KSampler -> VAEDecode
-CLIPTextEncode (positive) -> KSampler (positive)
-CLIPTextEncode (negative) -> KSampler (negative)
-EmptyLatentImage -> KSampler (latent_image)
-```
-
-## Tips
-
-- Always ask for the prompt if not provided
-- Suggest appropriate steps based on the model (SDXL: 20-30, SD1.5: 20-50)
-- Offer to add LoRA nodes if the user mentions specific styles
-- Ask about image dimensions (default: 1024x1024 for SDXL, 512x512 for SD1.5)
+- **LoRA**: insert `LoraLoader` between the checkpoint and its consumers:
+  checkpoint MODEL/CLIP -> LoraLoader -> KSampler `model` and both
+  CLIPTextEncode `clip` inputs. Pick the file with `list_models` (`loras`).
+- **Batch**: raise `batch_size` on `EmptyLatentImage`.
+- **Different sampler**: check the allowed `sampler_name` / `scheduler`
+  values with `get_node_info` before setting them.

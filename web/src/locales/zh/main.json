@@ -1,11 +1,12 @@
 {
-  "agent": {
-    "title": "开源智能体",
-    "welcome": "你好！我是你的开源 ComfyUI 智能体。告诉我你想创建什么，我会帮你构建工作流。",
-    "thinking": "思考中...",
-    "done": "完成！",
-    "error": "抱歉，出了点问题。请重试。",
-    "placeholder": "描述你想创建的内容... (Ctrl+Enter 发送)",
-    "send": "发送"
-  }
+  "title": "Open Agent",
+  "tooltip": "Open Agent：通过对话搭建和修改工作流",
+  "welcome": "你好！描述你想要的工作流，或者让我修改、运行、调试画布上的工作流。",
+  "placeholder": "描述你想做什么…（Enter 发送，Shift+Enter 换行）",
+  "send": "发送",
+  "stop": "停止",
+  "newChat": "新对话",
+  "working": "处理中…",
+  "requestFailed": "请求失败：{message}",
+  "settingsHint": "模型设置：设置 → Open Agent"
 }

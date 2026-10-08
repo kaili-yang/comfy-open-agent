@@ -1,16 +1,18 @@
-"""Comfy Open Agent - Open-source ComfyUI agent with MCP support."""
+"""Comfy Open Agent - open-source ComfyUI agent with MCP support."""
 
-__all__ = [
-    "NODE_CLASS_MAPPINGS",
-    "NODE_DISPLAY_NAME_MAPPINGS",
-    "WEB_DIRECTORY",
-]
+__version__ = "0.2.0"
 
-__author__ = "Comfy Open Agent Contributors"
-__email__ = ""
-__version__ = "0.1.0"
+# No custom nodes: the agent lives in a sidebar panel and HTTP routes
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
+WEB_DIRECTORY = "./web/dist"
 
-from .src.comfy_open_agent.nodes import NODE_CLASS_MAPPINGS
-from .src.comfy_open_agent.nodes import NODE_DISPLAY_NAME_MAPPINGS
+try:
+    from .src.comfy_open_agent.routes import register_routes
 
-WEB_DIRECTORY = "./web"
+    register_routes()
+except ImportError as e:
+    # Allows importing the package outside a running ComfyUI (e.g. in tests)
+    print(f"[comfy-open-agent] Routes not registered: {e}")
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

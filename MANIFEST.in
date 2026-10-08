@@ -1,7 +1,9 @@
 include README.md
 include LICENSE
+include requirements.txt
+include __init__.py
 recursive-include src *.py
-recursive-include web dist
-recursive-include skills *.md
+recursive-include web/dist *.js
+recursive-include skills *
 global-exclude __pycache__
 global-exclude *.pyc

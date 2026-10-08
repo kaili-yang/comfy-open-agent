@@ -1,11 +1,12 @@
 {
-  "agent": {
-    "title": "Open Agent",
-    "welcome": "Hello! I'm your open-source ComfyUI agent. Tell me what you'd like to create, and I'll help you build workflows.",
-    "thinking": "Thinking...",
-    "done": "Done!",
-    "error": "Sorry, something went wrong. Please try again.",
-    "placeholder": "Describe what you want to create... (Ctrl+Enter to send)",
-    "send": "Send"
-  }
+  "title": "Open Agent",
+  "tooltip": "Open Agent: build and edit workflows by chatting",
+  "welcome": "Hi! Describe the workflow you want, or ask me to change, run or debug the one on the canvas.",
+  "placeholder": "Describe what you want… (Enter to send, Shift+Enter for a new line)",
+  "send": "Send",
+  "stop": "Stop",
+  "newChat": "New chat",
+  "working": "Working…",
+  "requestFailed": "Request failed: {message}",
+  "settingsHint": "Model settings: Settings → Open Agent"
 }

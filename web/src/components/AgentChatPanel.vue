@@ -1,347 +1,319 @@
 <template>
-  <div class="agent-chat-panel">
-    <div class="chat-header">
-      <h3>{{ t('agent.title') }}</h3>
-      <div class="provider-selector">
-        <Dropdown
-          v-model="selectedProvider"
-          :options="providers"
-          optionLabel="label"
-          optionValue="value"
-          placeholder="Select Provider"
-          class="provider-dropdown"
-        />
+  <div class="coa-panel">
+    <header class="coa-header">
+      <div class="coa-heading">
+        <span class="coa-title">{{ t('title') }}</span>
+        <span v-if="chat.model" class="coa-model">{{ chat.model }}</span>
       </div>
-    </div>
-
-    <div class="chat-messages" ref="messagesContainer">
-      <div
-        v-for="(message, index) in messages"
-        :key="index"
-        :class="['message', message.role]"
+      <button
+        class="coa-button coa-ghost"
+        :disabled="chat.running"
+        :title="t('newChat')"
+        @click="newConversation"
       >
-        <div class="message-avatar">
-          <span v-if="message.role === 'user'">👤</span>
-          <span v-else>🤖</span>
+        <i class="pi pi-plus" /> {{ t('newChat') }}
+      </button>
+    </header>
+
+    <div ref="scroller" class="coa-messages">
+      <p v-if="chat.items.length === 0" class="coa-empty">
+        {{ t('welcome') }}<br />
+        <small>{{ t('settingsHint') }}</small>
+      </p>
+
+      <template v-for="(item, index) in chat.items" :key="index">
+        <div v-if="item.kind === 'user'" class="coa-bubble coa-user">
+          {{ item.text }}
         </div>
-        <div class="message-content">
-          <div class="message-text">{{ message.content }}</div>
-          <div v-if="message.operations" class="message-operations">
-            <div v-for="(op, opIndex) in message.operations" :key="opIndex" class="operation">
-              <Tag :value="op.type" severity="info" />
-              <span>{{ op.description }}</span>
-            </div>
-          </div>
+        <div
+          v-else-if="item.kind === 'assistant'"
+          class="coa-bubble coa-assistant"
+          v-html="renderMarkdown(item.text)"
+        />
+        <details v-else-if="item.kind === 'tool'" class="coa-tool">
+          <summary>
+            <i :class="toolIcon(item.step.status)" />
+            <span class="coa-tool-name">{{ item.step.name }}</span>
+            <span class="coa-tool-args">{{ argsPreview(item.step.arguments) }}</span>
+          </summary>
+          <pre>{{ JSON.stringify(item.step.arguments, null, 2) }}</pre>
+          <pre v-if="item.step.summary">{{ item.step.summary }}</pre>
+        </details>
+        <div
+          v-else
+          :class="['coa-notice', item.error && 'coa-error']"
+        >
+          {{ item.text }}
         </div>
-      </div>
-      <div v-if="isProcessing" class="message assistant">
-        <div class="message-avatar">🤖</div>
-        <div class="message-content">
-          <ProgressSpinner style="width: 24px; height: 24px" strokeWidth="4" />
-          <span>{{ t('agent.thinking') }}</span>
-        </div>
+      </template>
+
+      <div v-if="chat.running" class="coa-working">
+        <i class="pi pi-spin pi-spinner" /> {{ t('working') }}
       </div>
     </div>
 
-    <div class="chat-input">
-      <Textarea
-        v-model="userInput"
-        :placeholder="t('agent.placeholder')"
+    <form class="coa-input" @submit.prevent="submit">
+      <textarea
+        v-model="draft"
         rows="3"
-        autoResize
-        @keydown.ctrl.enter="sendMessage"
+        :placeholder="t('placeholder')"
+        @keydown.enter="onEnter"
       />
-      <Button
-        :label="t('agent.send')"
-        icon="pi pi-send"
-        @click="sendMessage"
-        :disabled="!userInput.trim() || isProcessing"
-      />
-    </div>
+      <button
+        v-if="chat.running"
+        type="button"
+        class="coa-button coa-stop"
+        @click="stopRunning"
+      >
+        <i class="pi pi-stop-circle" /> {{ t('stop') }}
+      </button>
+      <button v-else type="submit" class="coa-button" :disabled="!draft.trim()">
+        <i class="pi pi-send" /> {{ t('send') }}
+      </button>
+    </form>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, nextTick, watch } from 'vue'
-import { useI18n } from 'vue-i18n'
-import Dropdown from 'primevue/dropdown'
-import Button from 'primevue/button'
-import Textarea from 'primevue/textarea'
-import Tag from 'primevue/tag'
-import ProgressSpinner from 'primevue/progressspinner'
+import { nextTick, onMounted, ref, watch } from 'vue'
 
-interface Message {
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  operations?: Array<{
-    type: string
-    description: string
-  }>
+import type { ToolStep } from '@/lib/chatStore'
+import { chat, newConversation, sendMessage, stopRunning } from '@/lib/chatStore'
+import { t } from '@/lib/i18n'
+import { renderMarkdown } from '@/lib/markdown'
+
+const draft = ref('')
+const scroller = ref<HTMLElement>()
+
+function submit() {
+  const text = draft.value
+  if (!text.trim() || chat.running) return
+  draft.value = ''
+  void sendMessage(text)
 }
 
-interface Props {
-  widget: any
-  node: any
+function onEnter(event: KeyboardEvent) {
+  // Let Shift+Enter add a newline and keep IME composition (e.g. Chinese input) intact
+  if (event.shiftKey || event.isComposing) return
+  event.preventDefault()
+  submit()
 }
 
-const props = defineProps<Props>()
-const { t } = useI18n()
-
-const messages = ref<Message[]>([
-  {
-    role: 'assistant',
-    content: t('agent.welcome'),
-  },
-])
-const userInput = ref('')
-const isProcessing = ref(false)
-const selectedProvider = ref('local')
-const messagesContainer = ref<HTMLElement>()
-
-const providers = [
-  { label: 'Local LLM', value: 'local' },
-  { label: 'OpenAI', value: 'openai' },
-  { label: 'Anthropic', value: 'anthropic' },
-]
-
-async function sendMessage() {
-  if (!userInput.value.trim() || isProcessing.value) return
-
-  const userMessage = userInput.value.trim()
-  userInput.value = ''
-
-  // Add user message
-  messages.value.push({
-    role: 'user',
-    content: userMessage,
-  })
-
-  // Update widget
-  updateWidget()
-
-  isProcessing.value = true
-  scrollToBottom()
-
-  try {
-    // Send to backend
-    const response = await sendToBackend(userMessage)
-
-    // Add assistant response
-    messages.value.push({
-      role: 'assistant',
-      content: response.message || t('agent.done'),
-      operations: response.operations,
-    })
-
-    updateWidget()
-  } catch (error) {
-    console.error('Error sending message:', error)
-    messages.value.push({
-      role: 'assistant',
-      content: t('agent.error'),
-    })
-  } finally {
-    isProcessing.value = false
-    scrollToBottom()
-  }
+function toolIcon(status: ToolStep['status']) {
+  if (status === 'running') return 'pi pi-spin pi-spinner'
+  return status === 'ok' ? 'pi pi-check coa-ok' : 'pi pi-times coa-fail'
 }
 
-async function sendToBackend(message: string) {
-  // @ts-ignore
-  const graph = app.graph
-
-  // Get node configuration
-  const llmProvider = selectedProvider.value
-  const modelName = props.node.widgets?.find((w: any) => w.name === 'model_name')?.value || 'llama3.2'
-  const apiEndpoint = props.node.widgets?.find((w: any) => w.name === 'api_endpoint')?.value || 'http://localhost:11434/api/chat'
-  const apiKey = props.node.widgets?.find((w: any) => w.name === 'api_key')?.value || ''
-
-  // Prepare the request
-  const requestData = {
-    messages: messages.value,
-    provider: llmProvider,
-    model: modelName,
-    api_endpoint: apiEndpoint,
-    api_key: apiKey,
-  }
-
-  // Update widget with request data
-  props.widget.value = requestData
-
-  // Trigger node execution
-  // @ts-ignore
-  await app.queuePrompt()
-
-  // Get the result from the node output
-  // This is a simplified version - actual implementation will poll for results
-  return {
-    message: 'Workflow updated successfully',
-    operations: [
-      {
-        type: 'graph_edit',
-        description: 'Added/modified nodes based on your request',
-      },
-    ],
-  }
-}
-
-function updateWidget() {
-  props.widget.value = {
-    messages: messages.value,
-    provider: selectedProvider.value,
-  }
+function argsPreview(args: Record<string, unknown>) {
+  const text = JSON.stringify(args)
+  if (!text || text === '{}') return ''
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text
 }
 
 function scrollToBottom() {
-  nextTick(() => {
-    if (messagesContainer.value) {
-      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
-    }
+  void nextTick(() => {
+    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
   })
 }
 
-onMounted(() => {
-  // Load existing messages from widget if available
-  if (props.widget.value?.messages) {
-    messages.value = props.widget.value.messages
-  }
-  if (props.widget.value?.provider) {
-    selectedProvider.value = props.widget.value.provider
-  }
-  scrollToBottom()
-})
-
-watch(selectedProvider, () => {
-  updateWidget()
-})
+watch(() => [chat.items.length, chat.running], scrollToBottom)
+onMounted(scrollToBottom)
 </script>
 
 <style scoped>
-.agent-chat-panel {
+.coa-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #1e1e1e;
-  color: #ffffff;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  min-height: 0;
+  color: var(--input-text, #ddd);
+  font-size: 13px;
 }
 
-.chat-header {
+.coa-header {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: #2d2d2d;
-  border-bottom: 1px solid #3d3d3d;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color, #444);
 }
 
-.chat-header h3 {
-  margin: 0;
-  font-size: 16px;
+.coa-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.coa-title {
   font-weight: 600;
+  font-size: 14px;
 }
 
-.provider-selector {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.coa-model {
+  font-size: 11px;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.provider-dropdown {
-  width: 150px;
-}
-
-.chat-messages {
+.coa-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
-.message {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
+.coa-empty {
+  opacity: 0.7;
+  line-height: 1.5;
 }
 
-.message.user {
-  flex-direction: row-reverse;
-}
-
-.message-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
-.message.assistant .message-avatar {
-  background: #4a90e2;
-}
-
-.message.user .message-avatar {
-  background: #5cb85c;
-}
-
-.message-content {
-  flex: 1;
-  max-width: 80%;
-}
-
-.message.assistant .message-content {
-  background: #2d2d2d;
-  border-radius: 8px 8px 8px 0;
-  padding: 12px;
-}
-
-.message.user .message-content {
-  background: #4a90e2;
-  border-radius: 8px 8px 0 8px;
-  padding: 12px;
-}
-
-.message-text {
+.coa-bubble {
+  padding: 8px 10px;
+  border-radius: 8px;
   white-space: pre-wrap;
-  word-wrap: break-word;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
-.message-operations {
-  margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.coa-user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: var(--p-primary-color, #3b82f6);
+  color: var(--p-primary-contrast-color, #fff);
 }
 
-.operation {
+.coa-assistant {
+  background: var(--comfy-input-bg, #222);
+}
+
+.coa-assistant :deep(pre) {
+  margin: 6px 0;
+  padding: 8px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--comfy-menu-bg, #111);
+  white-space: pre;
+}
+
+.coa-assistant :deep(code) {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.coa-tool {
+  font-size: 12px;
+  border-left: 2px solid var(--border-color, #444);
+  padding-left: 8px;
+}
+
+.coa-tool summary {
+  cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  list-style: none;
+}
+
+.coa-tool-name {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+.coa-tool-args {
+  opacity: 0.55;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coa-tool pre {
+  margin: 4px 0;
+  padding: 6px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 4px;
+  background: var(--comfy-input-bg, #222);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.coa-ok {
+  color: #22c55e;
+}
+
+.coa-fail {
+  color: #ef4444;
+}
+
+.coa-notice {
   font-size: 12px;
-  color: #888;
+  opacity: 0.75;
+  font-style: italic;
 }
 
-.chat-input {
-  padding: 12px 16px;
-  background: #2d2d2d;
-  border-top: 1px solid #3d3d3d;
+.coa-error {
+  color: #ef4444;
+  opacity: 1;
+  font-style: normal;
+}
+
+.coa-working {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.coa-input {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color, #444);
 }
 
-.chat-input :deep(.p-textarea) {
-  flex: 1;
-  background: #1e1e1e;
-  border: 1px solid #3d3d3d;
-  color: #ffffff;
+.coa-input textarea {
+  resize: vertical;
+  min-height: 60px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #444);
+  background: var(--comfy-input-bg, #222);
+  color: inherit;
+  font: inherit;
 }
 
-.chat-input :deep(.p-textarea:focus) {
-  border-color: #4a90e2;
+.coa-button {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--p-primary-color, #3b82f6);
+  color: var(--p-primary-contrast-color, #fff);
+  font: inherit;
+}
+
+.coa-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.coa-ghost {
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--border-color, #444);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.coa-stop {
+  background: #ef4444;
 }
 </style>
